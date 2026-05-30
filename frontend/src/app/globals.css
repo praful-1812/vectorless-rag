@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-gray-950 text-gray-100;
+}
+
+@keyframes indeterminate {
+  0% { margin-left: 0; width: 30%; }
+  50% { margin-left: 40%; width: 40%; }
+  100% { margin-left: 80%; width: 20%; }
+}
