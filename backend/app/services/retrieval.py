@@ -26,14 +26,24 @@ async def retrieve_passages(
 
     logger.info(f"[Retrieval] Query: '{query[:60]}...' | files filter: {file_ids or 'all'}")
 
+    # If no files selected, don't search anything
+    if not file_ids:
+        logger.info("[Retrieval] No files selected, returning empty results")
+        return [], []
+
     # Get root nodes for selected files
     file_filter = [File.user_id == user_id]
-    if file_ids:
-        file_filter.append(File.id.in_(file_ids))
+    file_filter.append(File.id.in_(file_ids))
 
     result = await db.execute(select(File).where(*file_filter, File.tree_built == True))
     files = result.scalars().all()
     logger.info(f"[Retrieval] Found {len(files)} files with trees built")
+
+    # When many files are selected (>5), use root summaries for broad coverage
+    # This prevents context starvation (6000 chars / 20 files = garbage per file)
+    use_root_summaries = len(files) > 5
+    if use_root_summaries:
+        logger.info(f"[Retrieval] Many files selected ({len(files)}), using root summaries + targeted drill-down")
 
     for file in files:
         # Get root node
@@ -47,10 +57,21 @@ async def retrieve_passages(
         if not root:
             continue
 
-        # Traverse: root → branches → leaves
-        passages, path = await _traverse_tree(db, root, query, model)
-        all_passages.extend(passages)
-        traversal_path.extend(path)
+        if use_root_summaries:
+            # Add root summary as a passage (gives LLM overview of each file)
+            passage = _node_to_passage(root)
+            passage["file_name"] = file.name
+            passage["file_type"] = file.file_type
+            all_passages.append(passage)
+            traversal_path.append(root.id)
+        else:
+            # Normal deep traversal for focused queries on few files
+            passages, path = await _traverse_tree(db, root, query, model)
+            for p in passages:
+                p["file_name"] = file.name
+                p["file_type"] = file.file_type
+            all_passages.extend(passages)
+            traversal_path.extend(path)
 
     return all_passages, traversal_path
 

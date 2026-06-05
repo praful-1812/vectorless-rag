@@ -1,7 +1,7 @@
 """File upload and management endpoints."""
 
 import os
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File as FastAPIFile, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File as FastAPIFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +10,7 @@ from app.config import settings
 from app.db.database import get_db
 from app.db.models import User, File
 from app.api.deps import get_current_user
-from app.services.ingestion import ingest_file
+from app.services.queue import ingestion_queue
 
 router = APIRouter()
 
@@ -30,7 +30,6 @@ class FileResponse(BaseModel):
 @router.post("/upload", response_model=FileResponse)
 async def upload_file(
     file: UploadFile = FastAPIFile(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -54,8 +53,8 @@ async def upload_file(
     await db.commit()
     await db.refresh(db_file)
 
-    # Trigger background ingestion (MarkItDown + tree building)
-    background_tasks.add_task(ingest_file, db_file.id)
+    # Enqueue for background ingestion (processed sequentially)
+    await ingestion_queue.enqueue(db_file.id)
 
     return FileResponse(
         id=db_file.id,
@@ -105,3 +104,34 @@ async def delete_file(
     await db.delete(db_file)
     await db.commit()
     return {"status": "deleted"}
+
+
+@router.get("/queue-status")
+async def queue_status():
+    """Get the current ingestion queue status."""
+    return {
+        "queue_size": ingestion_queue.queue_size,
+        "is_processing": ingestion_queue.is_processing,
+    }
+
+
+@router.get("/{file_id}/content")
+async def get_file_content(
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get the parsed markdown content of a file."""
+    result = await db.execute(select(File).where(File.id == file_id, File.user_id == user.id))
+    db_file = result.scalar_one_or_none()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "id": db_file.id,
+        "name": db_file.name,
+        "file_type": db_file.file_type,
+        "size": db_file.size,
+        "tree_built": db_file.tree_built,
+        "markdown_content": db_file.markdown_content or "Content not yet parsed. File is still being processed.",
+    }

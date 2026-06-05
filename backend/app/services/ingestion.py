@@ -34,12 +34,17 @@ async def ingest_file(file_id: int):
         try:
             logger.info(f"[Ingestion] Step 1/3: Converting to Markdown via MarkItDown...")
             markdown_content = await convert_to_markdown(db_file.storage_path)
+            if not markdown_content or not markdown_content.strip():
+                logger.warning(f"[Ingestion] ⚠ Conversion produced empty content for '{db_file.name}'")
+                markdown_content = f"# {db_file.name}\n\nFile uploaded ({db_file.size} bytes). No text content could be extracted."
             db_file.markdown_content = markdown_content
             logger.info(f"[Ingestion] ✓ Markdown conversion complete. Length: {len(markdown_content)} chars")
             logger.debug(f"[Ingestion] First 200 chars: {markdown_content[:200]}")
         except Exception as e:
             logger.error(f"[Ingestion] ✗ MarkItDown conversion FAILED: {e}")
-            return
+            # Graceful fallback — still create a minimal entry
+            markdown_content = f"# {db_file.name}\n\nFile conversion failed: {str(e)[:200]}"
+            db_file.markdown_content = markdown_content
 
         # Step 2: Chunk by markdown structure
         logger.info(f"[Ingestion] Step 2/3: Chunking markdown by structure...")
@@ -67,8 +72,13 @@ async def ingest_file(file_id: int):
 
 
 async def convert_to_markdown(file_path: str) -> str:
-    """Convert any file to Markdown using MarkItDown."""
+    """Convert any file to Markdown using MarkItDown, with graceful fallbacks."""
     logger.info(f"[MarkItDown] Converting: {file_path}")
+
+    import os
+    ext = os.path.splitext(file_path)[1].lower()
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
 
     def _convert():
         from markitdown import MarkItDown
@@ -76,8 +86,100 @@ async def convert_to_markdown(file_path: str) -> str:
         result = md.convert(file_path)
         return result.text_content
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _convert)
+    def _read_as_text():
+        """Fallback: read file as plain text."""
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+    def _image_metadata():
+        """Extract image metadata as markdown."""
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS
+            img = Image.open(file_path)
+            meta = f"# Image: {filename}\n\n"
+            meta += f"- **Format**: {img.format}\n"
+            meta += f"- **Size**: {img.width} x {img.height} pixels\n"
+            meta += f"- **Mode**: {img.mode}\n"
+            meta += f"- **File size**: {file_size} bytes\n\n"
+            # Extract EXIF if available
+            exif_data = img.getexif()
+            if exif_data:
+                meta += "## EXIF Metadata\n\n"
+                for tag_id, value in exif_data.items():
+                    tag_name = TAGS.get(tag_id, tag_id)
+                    meta += f"- **{tag_name}**: {value}\n"
+            return meta
+        except Exception:
+            return f"# Image: {filename}\n\nBinary image file ({file_size} bytes). Cannot extract text content."
+
+    # Handle formats that need special treatment
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
+        logger.info(f"[MarkItDown] Image file detected, extracting metadata...")
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(None, _image_metadata)
+        if content.strip():
+            return content
+        return f"# Image: {filename}\n\nImage file ({file_size} bytes)."
+
+    if ext in (".mp3", ".wav", ".ogg", ".flac", ".m4a"):
+        logger.warning(f"[MarkItDown] Audio file detected. Attempting conversion (requires ffmpeg)...")
+        try:
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, _convert)
+            if content and content.strip():
+                return content
+        except Exception as e:
+            logger.warning(f"[MarkItDown] Audio conversion failed (ffmpeg likely not installed): {e}")
+        # Fallback: store basic audio info
+        return (
+            f"# Audio: {filename}\n\n"
+            f"- **Format**: {ext}\n"
+            f"- **File size**: {file_size} bytes\n\n"
+            f"*Audio transcription unavailable. Install ffmpeg for speech-to-text support.*"
+        )
+
+    if ext in (".json",):
+        # MarkItDown may not handle JSON well — read as plain text
+        try:
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, _convert)
+            if content and content.strip():
+                return content
+        except Exception:
+            pass
+        logger.info(f"[MarkItDown] Falling back to plain text read for .json")
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _read_as_text)
+
+    if ext in (".xml",):
+        try:
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, _convert)
+            if content and content.strip():
+                return content
+        except Exception:
+            pass
+        logger.info(f"[MarkItDown] Falling back to plain text read for .xml")
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _read_as_text)
+
+    # Default: use MarkItDown
+    try:
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(None, _convert)
+        if content and content.strip():
+            return content
+        # If MarkItDown returns empty, try plain text
+        logger.warning(f"[MarkItDown] Empty result, falling back to plain text read")
+        return await loop.run_in_executor(None, _read_as_text)
+    except Exception as e:
+        logger.warning(f"[MarkItDown] Conversion failed ({e}), trying plain text fallback")
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, _read_as_text)
+        except Exception:
+            return f"# File: {filename}\n\nBinary file ({file_size} bytes). Could not extract text content."
 
 
 def chunk_markdown(markdown: str) -> list[dict]:

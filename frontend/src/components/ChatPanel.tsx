@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ModelSelector } from '@/components/ModelSelector';
-import { getMessages, sendMessage, createSession } from '@/lib/api';
+import { getMessages, sendMessage, createSession, parseMessageStream } from '@/lib/api';
 
 interface ChatPanelProps {
   sessionId: number | null;
@@ -22,8 +22,9 @@ interface ChatMessage {
 export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSessionCreated }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [selectedModel, setSelectedModel] = useState('gemini/gemini-3.1-flash-lite');
+  const [selectedModel, setSelectedModel] = useState('ollama/llama3');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [progressStage, setProgressStage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load messages when session changes (but not while streaming)
@@ -70,26 +71,31 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
       const stream = await sendMessage(activeSessionId!, query, selectedFileIds, selectedModel);
       if (!stream) return;
 
-      const reader = stream.getReader();
-      const decoder = new TextDecoder();
-      let assistantContent = '';
-
       const assistantMsg: ChatMessage = {
         id: Date.now() + 1,
         role: 'assistant',
         content: '',
       };
-      setMessages((prev) => [...prev, assistantMsg]);
+      let contentStarted = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        assistantContent += decoder.decode(value, { stream: true });
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsg.id ? { ...m, content: assistantContent } : m
-          )
-        );
+      for await (const event of parseMessageStream(stream)) {
+        if (event.type === 'progress') {
+          setProgressStage(event.message);
+        } else if (event.type === 'content') {
+          if (!contentStarted) {
+            contentStarted = true;
+            setProgressStage(null);
+            setMessages((prev) => [...prev, assistantMsg]);
+          }
+          assistantMsg.content += event.text;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMsg.id ? { ...m, content: assistantMsg.content } : m
+            )
+          );
+        } else if (event.type === 'done') {
+          setProgressStage(null);
+        }
       }
     } catch (err: any) {
       setMessages((prev) => [
@@ -98,6 +104,7 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
       ]);
     } finally {
       setIsStreaming(false);
+      setProgressStage(null);
     }
   };
 
@@ -106,8 +113,28 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full text-gray-500">
-            <p>Upload files, select them, and ask a question.</p>
+          <div className="flex flex-col items-center justify-center h-full gap-6">
+            <h2 className="text-2xl font-light text-gray-200">What are you working on?</h2>
+            <div className="flex flex-wrap justify-center gap-3">
+              <button
+                onClick={() => setInput('Summarize the key insights from my files')}
+                className="px-4 py-2.5 text-sm text-gray-300 border border-gray-700 rounded-full hover:bg-gray-800 hover:border-gray-600 transition-colors flex items-center gap-2"
+              >
+                📊 Summarize insights
+              </button>
+              <button
+                onClick={() => setInput('Compare the data across my files')}
+                className="px-4 py-2.5 text-sm text-gray-300 border border-gray-700 rounded-full hover:bg-gray-800 hover:border-gray-600 transition-colors flex items-center gap-2"
+              >
+                🔍 Compare data
+              </button>
+              <button
+                onClick={() => setInput('Suggest analytical questions from my files')}
+                className="px-4 py-2.5 text-sm text-gray-300 border border-gray-700 rounded-full hover:bg-gray-800 hover:border-gray-600 transition-colors flex items-center gap-2"
+              >
+                💡 Suggest questions
+              </button>
+            </div>
           </div>
         )}
 
@@ -145,9 +172,16 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
           </div>
         ))}
 
-        {isStreaming && !messages[messages.length - 1]?.content && (
-          <div className="max-w-3xl mx-auto p-4 rounded-lg bg-gray-800 animate-pulse">
-            <p className="text-sm text-gray-400">Thinking...</p>
+        {isStreaming && progressStage && (
+          <div className="max-w-3xl mx-auto p-4 rounded-lg bg-gray-800 border border-gray-700">
+            <div className="flex items-center gap-3">
+              <div className="flex gap-1">
+                <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce [animation-delay:0ms]" />
+                <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce [animation-delay:150ms]" />
+                <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce [animation-delay:300ms]" />
+              </div>
+              <p className="text-sm text-gray-300">{progressStage}</p>
+            </div>
           </div>
         )}
         <div ref={messagesEndRef} />
@@ -159,7 +193,7 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
           <button
             onClick={onToggleFiles}
             className="px-3 py-2 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg"
-            title="Toggle file panel"
+            title="Toggle file panel" 
           >
             📁
           </button>
@@ -183,13 +217,18 @@ export function ChatPanel({ sessionId, selectedFileIds, onToggleFiles, onSession
 
           <button
             onClick={handleSend}
-            disabled={!input.trim() || isStreaming}
+            disabled={!input.trim() || isStreaming || selectedFileIds.length === 0}
             className="px-4 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-sm font-medium"
           >
             Send
           </button>
         </div>
 
+        {selectedFileIds.length === 0 && (
+          <p className="text-xs text-yellow-500 mt-2 max-w-3xl mx-auto">
+            Select at least one file to start chatting
+          </p>
+        )}
         {selectedFileIds.length > 0 && (
           <p className="text-xs text-gray-500 mt-2 max-w-3xl mx-auto">
             Searching in {selectedFileIds.length} file(s)

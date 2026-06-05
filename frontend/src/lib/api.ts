@@ -73,6 +73,30 @@ export async function login(email: string, password: string) {
   return data;
 }
 
+export async function getMe() {
+  const res = await request('/auth/me');
+  return res.json();
+}
+
+export async function updateProfile(data: { display_name?: string }) {
+  const res = await request('/auth/profile', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return res.json();
+}
+
+export async function uploadAvatar(file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await request('/auth/profile/avatar', {
+    method: 'POST',
+    body: formData,
+  });
+  return res.json();
+}
+
 // Files
 export async function uploadFile(file: File) {
   const formData = new FormData();
@@ -125,6 +149,11 @@ export async function deleteFile(fileId: number) {
   await request(`/files/${fileId}`, { method: 'DELETE' });
 }
 
+export async function getFileContent(fileId: number) {
+  const res = await request(`/files/${fileId}/content`);
+  return res.json();
+}
+
 // Sessions
 export async function createSession(title?: string) {
   const res = await request('/chat/sessions', {
@@ -137,6 +166,10 @@ export async function createSession(title?: string) {
 export async function listSessions() {
   const res = await request('/chat/sessions');
   return res.json();
+}
+
+export async function deleteSession(sessionId: number) {
+  await request(`/chat/sessions/${sessionId}`, { method: 'DELETE' });
 }
 
 export async function getMessages(sessionId: number) {
@@ -162,6 +195,51 @@ export async function sendMessage(
 
   if (!res.ok) throw new Error('Failed to send message');
   return res.body;
+}
+
+export type StreamEvent =
+  | { type: 'progress'; stage: string; message: string }
+  | { type: 'content'; text: string }
+  | { type: 'done' };
+
+/**
+ * Parse NDJSON stream into typed events.
+ */
+export async function* parseMessageStream(
+  stream: ReadableStream<Uint8Array>
+): AsyncGenerator<StreamEvent> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as StreamEvent;
+        yield event;
+      } catch {
+        // Fallback: treat as raw content (backward compat)
+        yield { type: 'content', text: line };
+      }
+    }
+  }
+
+  // Process any remaining buffer
+  if (buffer.trim()) {
+    try {
+      yield JSON.parse(buffer) as StreamEvent;
+    } catch {
+      yield { type: 'content', text: buffer };
+    }
+  }
 }
 
 // Settings

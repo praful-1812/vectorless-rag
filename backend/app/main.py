@@ -12,6 +12,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from app.api import auth, files, chat, settings
 from app.db.database import engine, Base
+from app.services.queue import ingestion_queue
 
 # Configure logging
 logging.basicConfig(
@@ -48,6 +49,12 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ingestion_queue.start()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await ingestion_queue.stop()
 
 
 @app.get("/health")

@@ -14,6 +14,7 @@ Change DEFAULT_MODEL below or pass model from the frontend.
 import json
 import logging
 import asyncio
+import os
 from typing import AsyncGenerator
 import litellm
 
@@ -28,7 +29,38 @@ RETRY_BASE_DELAY = 4  # seconds
 #   "anthropic/claude-haiku-4-20250514"  → Anthropic (needs ANTHROPIC_API_KEY)
 #   "gemini/gemini-2.0-flash"   → Google (needs GEMINI_API_KEY)
 #   "ollama/llama3"             → Local Ollama (no key needed!)
-DEFAULT_MODEL = "gemini/gemini-3.1-flash-lite"
+DEFAULT_MODEL = "ollama/llama3"
+
+
+# Map model prefix to env var name
+MODEL_PREFIX_TO_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "azure": "AZURE_API_KEY",
+}
+
+# Map provider_name (from DB) to env var name
+PROVIDER_NAME_TO_ENV = {
+    "google": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def set_api_key_for_model(model: str, api_key: str):
+    """Set the correct environment variable for a given model's provider."""
+    prefix = model.split("/")[0] if "/" in model else model
+    env_var = MODEL_PREFIX_TO_ENV.get(prefix)
+    if env_var:
+        os.environ[env_var] = api_key
+        logger.info(f"[LLM] Set {env_var} from user provider (for model {model})")
+
+
+def get_env_var_for_provider(provider_name: str) -> str | None:
+    """Get the env var name for a provider."""
+    return PROVIDER_NAME_TO_ENV.get(provider_name)
 
 
 async def summarize_text(text: str, instruction: str, model: str | None = None) -> str:
@@ -82,6 +114,12 @@ async def llm_select_branches(
     )
 
     try:
+        # For Ollama models, set larger context window
+        extra_params = {}
+        if model and model.startswith("ollama/"):
+            extra_params["api_base"] = "http://localhost:11434"
+            extra_params["num_ctx"] = 32768
+
         response = await litellm.acompletion(
             model=model,
             messages=[
@@ -100,6 +138,7 @@ async def llm_select_branches(
             ],
             max_tokens=100,
             temperature=0.1,
+            **extra_params,
         )
 
         content = response.choices[0].message.content.strip()
@@ -130,42 +169,92 @@ async def generate_response(
     model = model or DEFAULT_MODEL
     logger.info(f"[LLM] Generate response → model={model}, passages={len(passages)}, query='{query[:50]}...'")
 
-    # Build context from passages
-    context = "\n\n---\n\n".join(
-        f"[Source: {p['source_location']}]\n{p['content']}"
-        for p in passages
-    )
-    logger.debug(f"[LLM] Context length: {len(context)} chars")
+    # Truncate passages to fit within context window
+    # For Ollama with increased num_ctx (32K), allow more context
+    # For cloud models, allow even more
+    max_context_chars = 20000  # ~5K tokens for cloud models
+    if model and model.startswith("ollama/"):
+        max_context_chars = 24000  # ~6K tokens — fits well in 32K ctx with output room
+
+    # Build context from passages, truncating each and total
+    truncated_passages = []
+    total_chars = 0
+    max_per_passage = max_context_chars // max(len(passages), 1)
+    for p in passages:
+        content = p['content'][:max_per_passage]
+        if total_chars + len(content) > max_context_chars:
+            content = content[:max(0, max_context_chars - total_chars)]
+            if content:
+                file_label = f"{p.get('file_name', 'Unknown')} ({p.get('file_type', '')})"
+                truncated_passages.append(f"[Source: {file_label} > {p['source_location']}]\n{content}")
+            break
+        file_label = f"{p.get('file_name', 'Unknown')} ({p.get('file_type', '')})"
+        truncated_passages.append(f"[Source: {file_label} > {p['source_location']}]\n{content}")
+        total_chars += len(content)
+
+    context = "\n\n---\n\n".join(truncated_passages)
+    logger.info(f"[LLM] Context length: {len(context)} chars (from {len(passages)} passages, truncated to {len(truncated_passages)})")
+
+    # Collect unique file names for the prompt
+    file_names = list(set(p.get('file_name', 'Unknown') for p in passages))
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a helpful assistant. Answer the user's question based on the provided document passages. "
-                "Cite your sources using [Source: ...] references. "
-                "If the passages don't contain enough information, say so clearly."
+                "You are an expert document analyst. You are given passages extracted from the following source files:\n"
+                f"{chr(10).join(f'  • {name}' for name in file_names)}\n\n"
+                "INSTRUCTIONS:\n"
+                "1. Analyze the content carefully, respecting the original format (tables, CSV data, structured data, etc.).\n"
+                "2. Provide detailed, insightful answers based ONLY on the document content.\n"
+                "3. Always cite sources using the format: **[Source: filename > section]**\n"
+                "4. If data is tabular/CSV, summarize with key statistics, column descriptions, and notable patterns.\n"
+                "5. Recognize the file type and format — mention it in your response (e.g., 'This is a CSV/Excel file containing...').\n"
+                "6. Structure your response clearly with headings and bullet points when appropriate.\n"
+                "7. If passages don't contain enough information for a complete answer, state what's missing."
             ),
         },
         {
             "role": "user",
-            "content": f"## Retrieved Passages:\n\n{context}\n\n---\n\n## Question:\n{query}",
+            "content": f"## Source Documents:\n\n{context}\n\n---\n\n## Question:\n{query}",
         },
     ]
 
+    # Calculate total prompt size for logging
+    total_prompt_chars = sum(len(m["content"]) for m in messages)
+    logger.info(f"[LLM] Total prompt size: {total_prompt_chars} chars (~{total_prompt_chars // 4} tokens)")
+
     try:
+        # For Ollama models, set larger context window and ensure full output
+        extra_params = {}
+        if model and model.startswith("ollama/"):
+            extra_params["api_base"] = "http://localhost:11434"
+            extra_params["num_ctx"] = 32768
+            extra_params["num_predict"] = 2048
+            logger.info(f"[LLM] Ollama mode: num_ctx=32768, num_predict=2048")
+
         response = await litellm.acompletion(
             model=model,
             messages=messages,
             stream=True,
             temperature=0.7,
+            max_tokens=2048,
+            **extra_params,
         )
 
+        total_chars = 0
+        chunk_count = 0
         async for chunk in response:
+            chunk_count += 1
             delta = chunk.choices[0].delta
+            finish_reason = chunk.choices[0].finish_reason
             if delta.content:
+                total_chars += len(delta.content)
                 yield delta.content
+            if finish_reason:
+                logger.info(f"[LLM] Stream finish_reason: {finish_reason} (after {chunk_count} chunks)")
 
-        logger.info(f"[LLM] ✓ Response stream complete")
+        logger.info(f"[LLM] ✓ Response stream complete ({total_chars} chars, {chunk_count} chunks total)")
     except Exception as e:
         logger.error(f"[LLM] ✗ Generate response FAILED: {e}")
         yield f"\n\nError: {str(e)}\n\nMake sure your LLM API key is configured."

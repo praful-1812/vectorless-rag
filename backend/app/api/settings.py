@@ -63,6 +63,8 @@ class ProviderResponse(BaseModel):
     provider_name: str
     models: list
     is_active: bool
+    masked_key: str = ""
+    api_key: str = ""
 
     class Config:
         from_attributes = True
@@ -88,6 +90,8 @@ async def add_provider(
         provider_name=provider.provider_name,
         models=provider.models,
         is_active=provider.is_active,
+        masked_key=provider.api_key[:4] + "••••••••" + provider.api_key[-4:] if len(provider.api_key) > 8 else "••••••••",
+        api_key=provider.api_key,
     )
 
 
@@ -100,7 +104,9 @@ async def list_providers(
     providers = result.scalars().all()
     return [
         ProviderResponse(
-            id=p.id, provider_name=p.provider_name, models=p.models, is_active=p.is_active
+            id=p.id, provider_name=p.provider_name, models=p.models, is_active=p.is_active,
+            masked_key=p.api_key[:4] + "••••••••" + p.api_key[-4:] if len(p.api_key) > 8 else "••••••••",
+            api_key=p.api_key,
         )
         for p in providers
     ]

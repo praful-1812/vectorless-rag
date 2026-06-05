@@ -2,10 +2,13 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { uploadFileWithProgress, listFiles, deleteFile } from '@/lib/api';
+import { FileContentViewer } from './FileContentViewer';
 
 interface FilePanelProps {
   selectedFileIds: number[];
   onToggleFile: (id: number) => void;
+  onSelectAll?: (ids: number[]) => void;
+  onClose?: () => void;
 }
 
 interface UploadedFile {
@@ -51,10 +54,11 @@ function useIndexingProgress(files: UploadedFile[]) {
   return progress;
 }
 
-export function FilePanel({ selectedFileIds, onToggleFile }: FilePanelProps) {
+export function FilePanel({ selectedFileIds, onToggleFile, onSelectAll, onClose }: FilePanelProps) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [viewingFile, setViewingFile] = useState<{ id: number; name: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const indexingProgress = useIndexingProgress(files);
@@ -73,34 +77,53 @@ export function FilePanel({ selectedFileIds, onToggleFile }: FilePanelProps) {
     } catch {}
   };
 
+  const MAX_FILES_AT_ONCE = 10;
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await doUpload(file);
+    const selectedFiles = Array.from(e.target.files || []);
+    if (selectedFiles.length === 0) return;
+    if (selectedFiles.length > MAX_FILES_AT_ONCE) {
+      alert(`You can upload a maximum of ${MAX_FILES_AT_ONCE} files at once.`);
+      e.target.value = '';
+      return;
+    }
+    await doUploadBatch(selectedFiles);
     e.target.value = '';
   };
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
-    await doUpload(file);
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length === 0) return;
+    if (droppedFiles.length > MAX_FILES_AT_ONCE) {
+      alert(`You can upload a maximum of ${MAX_FILES_AT_ONCE} files at once.`);
+      return;
+    }
+    await doUploadBatch(droppedFiles);
   };
 
-  const doUpload = async (file: File) => {
+  const doUploadBatch = async (filesToUpload: File[]) => {
     setUploading(true);
     setUploadProgress(0);
-    try {
-      const uploaded = await uploadFileWithProgress(file, (percent) => {
-        setUploadProgress(percent);
-      });
-      setFiles((prev) => [...prev, uploaded]);
-    } catch (err: any) {
-      alert('Upload failed: ' + err.message);
-    } finally {
-      setUploading(false);
-      setUploadProgress(0);
+    const total = filesToUpload.length;
+    let completed = 0;
+
+    for (const file of filesToUpload) {
+      try {
+        const uploaded = await uploadFileWithProgress(file, (percent) => {
+          const overallProgress = ((completed + percent / 100) / total) * 100;
+          setUploadProgress(Math.round(overallProgress));
+        });
+        setFiles((prev) => [...prev, uploaded]);
+        completed++;
+        setUploadProgress(Math.round((completed / total) * 100));
+      } catch (err: any) {
+        alert(`Upload failed for "${file.name}": ${err.message}`);
+      }
     }
+
+    setUploading(false);
+    setUploadProgress(0);
   };
 
   const handleDelete = async (fileId: number) => {
@@ -111,9 +134,29 @@ export function FilePanel({ selectedFileIds, onToggleFile }: FilePanelProps) {
   };
 
   return (
-    <div className="w-72 bg-gray-900 border-r border-gray-800 flex flex-col">
-      <div className="p-4 border-b border-gray-800">
-        <h2 className="text-sm font-semibold text-gray-400 uppercase">Files</h2>
+    <div className="w-full h-full bg-gray-900 border-l border-gray-800 flex flex-col">
+      <div className="p-4 border-b border-gray-800 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase">Sources</h2>
+        <div className="flex items-center gap-1">
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="group p-1.5 rounded-lg hover:bg-gray-800 transition-all duration-200"
+              title="Collapse panel"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="w-4 h-4 text-gray-500 group-hover:text-blue-400 transition-colors duration-200"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Drop zone */}
@@ -124,7 +167,7 @@ export function FilePanel({ selectedFileIds, onToggleFile }: FilePanelProps) {
         onClick={() => fileInputRef.current?.click()}
       >
         <p className="text-sm text-gray-400">
-          {uploading ? 'Uploading...' : 'Drop files here or click to upload'}
+          {uploading ? 'Uploading...' : 'Drop files here or click to upload (max 10)'}
         </p>
         {uploading && (
           <div className="mt-2 w-full bg-gray-700 rounded-full h-2 overflow-hidden">
@@ -137,49 +180,128 @@ export function FilePanel({ selectedFileIds, onToggleFile }: FilePanelProps) {
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           onChange={handleUpload}
           className="hidden"
           accept=".pdf,.docx,.txt,.csv,.xlsx,.pptx,.html,.json,.xml,.png,.jpg,.mp3,.wav"
         />
       </div>
 
+      {/* Select All button */}
+      {onSelectAll && files.length > 0 && (
+        <div className="px-3 pt-2 pb-1">
+          <button
+            onClick={() => {
+              const allIds = files.map((f) => f.id);
+              const allSelected = allIds.every((id) => selectedFileIds.includes(id));
+              onSelectAll(allSelected ? [] : allIds);
+            }}
+            className="w-full px-4 py-2.5 text-sm font-medium text-gray-400 hover:text-blue-400 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors text-left"
+          >
+            {files.every((f) => selectedFileIds.includes(f.id)) ? '☑ Deselect All' : '☐ Select All'}
+          </button>
+        </div>
+      )}
+
       {/* File list */}
       <div className="flex-1 overflow-y-auto px-3">
         {files.map((file) => (
-          <div key={file.id} className="group">
-            <div className="flex items-center gap-2 py-2 px-2 rounded hover:bg-gray-800">
-              <input
-                type="checkbox"
-                checked={selectedFileIds.includes(file.id)}
-                onChange={() => onToggleFile(file.id)}
-                className="rounded border-gray-600"
-              />
-              <span className="text-sm truncate flex-1">{file.name}</span>
-              {/* {!file.tree_built && (
-                <span className="text-xs text-yellow-500"></span>
-              )} */}
-              {/* {file.tree_built && (
-                <span className="text-xs text-green-500">✓</span>
-              )} */}
-              <button
-                onClick={() => handleDelete(file.id)}
-                className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs"
-                title="Delete file"
-              >
-                ✕
-              </button>
-            </div>
-            {!file.tree_built && (
-              <div className="mx-2 mb-1 bg-gray-700 rounded-full h-1.5 overflow-hidden" style={{ width: 'calc(100% - 16px)' }}>
-                <div
-                  className="bg-yellow-500 h-1.5 rounded-full transition-all duration-700 ease-out"
-                  style={{ width: `${indexingProgress[file.id] || 5}%` }}
-                />
-              </div>
-            )}
-          </div>
+          <FileItem
+            key={file.id}
+            file={file}
+            selected={selectedFileIds.includes(file.id)}
+            onToggle={() => onToggleFile(file.id)}
+            onDelete={() => handleDelete(file.id)}
+            onView={() => setViewingFile({ id: file.id, name: file.name })}
+            indexingProgress={indexingProgress[file.id]}
+          />
         ))}
       </div>
+
+      {/* File content viewer modal */}
+      {viewingFile && (
+        <FileContentViewer
+          fileId={viewingFile.id}
+          fileName={viewingFile.name}
+          onClose={() => setViewingFile(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Individual file item with options menu
+function FileItem({ file, selected, onToggle, onDelete, onView, indexingProgress }: {
+  file: UploadedFile;
+  selected: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+  onView: () => void;
+  indexingProgress?: number;
+}) {
+  const [showMenu, setShowMenu] = useState(false);
+
+  return (
+    <div className="mb-1">
+      <div className="flex items-center py-3 px-2 rounded-lg hover:bg-gray-800 group">
+        <button
+          onClick={onToggle}
+          className={`w-5 h-5 rounded-md border-2 mr-4 flex items-center justify-center transition-colors flex-shrink-0 ${
+            selected ? 'bg-white border-white' : 'border-gray-500 hover:border-white'
+          }`}
+        >
+          {selected && (
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 text-gray-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          )}
+        </button>
+        <span
+          className="text-[13px] truncate flex-1 cursor-pointer hover:text-blue-400 transition-colors"
+          onClick={onView}
+          title="Click to view parsed content"
+        >
+          {file.name}
+        </span>
+        <div className="relative">
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
+            className="p-1 rounded hover:bg-gray-700 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-all"
+            title="Options"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
+            </svg>
+          </button>
+          {showMenu && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowMenu(false)} />
+              <div className="absolute right-0 top-7 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[120px]">
+                <button
+                  onClick={() => { onView(); setShowMenu(false); }}
+                  className="w-full px-3 py-2 text-left text-xs text-gray-300 hover:bg-gray-700 rounded"
+                >
+                  👁 View content
+                </button>
+                <button
+                  onClick={() => { onDelete(); setShowMenu(false); }}
+                  className="w-full px-3 py-2 text-left text-xs text-red-400 hover:bg-gray-700 rounded"
+                >
+                  🗑 Delete
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      {!file.tree_built && (
+        <div className="mx-2 mb-1 bg-gray-700 rounded-full h-1.5 overflow-hidden" style={{ width: 'calc(100% - 16px)' }}>
+          <div
+            className="bg-yellow-500 h-1.5 rounded-full transition-all duration-700 ease-out"
+            style={{ width: `${indexingProgress || 5}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

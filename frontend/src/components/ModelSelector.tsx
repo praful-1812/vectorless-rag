@@ -8,6 +8,10 @@ interface ModelSelectorProps {
 }
 
 const AVAILABLE_MODELS = [
+  { id: 'ollama/llama3', label: 'Llama 3', provider: 'Ollama (Local)' },
+  { id: 'ollama/llama3.1', label: 'Llama 3.1', provider: 'Ollama (Local)' },
+  { id: 'ollama/mistral', label: 'Mistral', provider: 'Ollama (Local)' },
+  { id: 'ollama/gemma2', label: 'Gemma 2', provider: 'Ollama (Local)' },
   { id: 'gemini/gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite', provider: 'Google' },
   { id: 'gemini/gemini-2.0-flash', label: 'Gemini 2.0 Flash', provider: 'Google' },
   { id: 'openai/gpt-4o-mini', label: 'GPT-4o Mini', provider: 'OpenAI' },
