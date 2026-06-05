@@ -260,7 +260,3 @@ Configure in the app's Settings panel, or set in `backend/.env`:
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-haiku-4-20250514` | Great reasoning |
 
 ---
-
-## 📜 License
-
-MIT
