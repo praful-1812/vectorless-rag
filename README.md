@@ -4,7 +4,12 @@
 
 ## 🎬 Demo
 
-https://github.com/praful-1812/vectorless-rag/raw/main/demo.mov
+<!-- 
+  To make the video work: drag demo.mp4 into a GitHub Issue, 
+  copy the generated URL, and replace the URL below.
+-->
+
+https://github.com/praful-1812/vectorless-rag/raw/main/demo.mp4
 
 > *Upload files, ask questions, get cited answers — all running locally with Ollama.*
 
