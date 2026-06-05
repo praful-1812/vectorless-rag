@@ -9,7 +9,7 @@
   copy the generated URL, and replace the URL below.
 -->
 
-https://github.com/praful-1812/vectorless-rag/raw/main/demo.mp4
+https://github.com/user-attachments/assets/c503e8e6-6937-4d58-9947-4e8515f65f4d
 
 > *Upload files, ask questions, get cited answers — all running locally with Ollama.*
 
