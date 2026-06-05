@@ -4,7 +4,7 @@
 
 ## 🎬 Demo
 
-<video src="https://github.com/praful-1812/vectorless-rag/raw/main/demo.mov" controls width="100%"></video>
+https://github.com/praful-1812/vectorless-rag/raw/main/demo.mov
 
 > *Upload files, ask questions, get cited answers — all running locally with Ollama.*
 
